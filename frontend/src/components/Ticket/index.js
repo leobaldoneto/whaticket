@@ -416,8 +416,6 @@ const Ticket = () => {
 		}
 	};
 
-<<<<<<< HEAD
-=======
 	const parseVcard = vcard => {
 		var Re1 = /^(version|fn|title|org):(.+)$/i;
 		var Re2 = /^([^:;]+);([^:]+):(.+)$/;
@@ -462,7 +460,6 @@ const Ticket = () => {
 		return fields;
 	};
 
->>>>>>> upstream/master
 	const checkMessageMedia = message => {
 		if (message.mediaType === "image") {
 			return (
@@ -607,12 +604,8 @@ const Ticket = () => {
 							{renderDailyTimestamps(message, index)}
 							{renderMessageDivider(message, index)}
 							<div className={classes.messageLeft}>
-<<<<<<< HEAD
-								{message.mediaUrl && checkMessageMedia(message)}
-=======
 								{(message.mediaUrl || message.mediaType === "vcard") &&
 									checkMessageMedia(message)}
->>>>>>> upstream/master
 								<div className={classes.textContentItem}>
 									{message.mediaType !== "vcard" && message.body}
 									<span className={classes.timestamp}>
@@ -638,13 +631,8 @@ const Ticket = () => {
 								>
 									<ExpandMore />
 								</IconButton>
-<<<<<<< HEAD
-								{message.mediaUrl && checkMessageMedia(message)}
-								{/* <div className={classes.textContentItem}> */}
-=======
 								{(message.mediaUrl || message.mediaType === "vcard") &&
 									checkMessageMedia(message)}
->>>>>>> upstream/master
 								<div
 									className={clsx(classes.textContentItem, {
 										[classes.textContentItemDeleted]: message.isDeleted,
