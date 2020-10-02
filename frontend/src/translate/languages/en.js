@@ -178,7 +178,8 @@ const messages = {
 			},
 			newTicketModal: {
 				title: "Create Ticket",
-				fieldLabel: "Type to search for the contact",
+				fieldLabel: "Type to search for a contact",
+				noOptions: "No contacts found. Try another name.",
 				buttons: {
 					ok: "Save",
 					cancel: "Cancel",
@@ -244,6 +245,7 @@ const messages = {
 						return: "Return",
 						resolve: "Resolve",
 						reopen: "Reopen",
+						accept: "Accept",
 					},
 				},
 			},

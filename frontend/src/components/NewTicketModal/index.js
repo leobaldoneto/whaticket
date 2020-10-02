@@ -9,7 +9,9 @@ import Dialog from "@material-ui/core/Dialog";
 import DialogActions from "@material-ui/core/DialogActions";
 import DialogContent from "@material-ui/core/DialogContent";
 import DialogTitle from "@material-ui/core/DialogTitle";
-import Autocomplete from "@material-ui/lab/Autocomplete";
+import Autocomplete, {
+	createFilterOptions,
+} from "@material-ui/lab/Autocomplete";
 import CircularProgress from "@material-ui/core/CircularProgress";
 import { green } from "@material-ui/core/colors";
 
@@ -38,6 +40,10 @@ const useStyles = makeStyles(theme => ({
 		marginLeft: -12,
 	},
 }));
+
+const filterOptions = createFilterOptions({
+	trim: true,
+});
 
 const NewTicketModal = ({ modalOpen, onClose }) => {
 	const history = useHistory();
@@ -121,7 +127,8 @@ const NewTicketModal = ({ modalOpen, onClose }) => {
 								setSelectedContact(newValue);
 							}}
 							options={options}
-							noOptionsText="No contacts found. Try another term."
+							filterOptions={filterOptions}
+							noOptionsText={i18n.t("newTicketModal.noOptions")}
 							loading={loading}
 							renderInput={params => (
 								<TextField

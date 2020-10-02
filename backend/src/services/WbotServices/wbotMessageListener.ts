@@ -1,8 +1,9 @@
-import path from "path";
-import fs from "fs";
+import { join } from "path";
+import { promisify } from "util";
+import { writeFile } from "fs";
 import { Op } from "sequelize";
 import { subHours } from "date-fns";
-import Sentry from "@sentry/node";
+import * as Sentry from "@sentry/node";
 
 import {
   Contact as WbotContact,
@@ -19,40 +20,87 @@ import { getWbot } from "../../libs/wbot";
 import AppError from "../../errors/AppError";
 import ShowTicketService from "../TicketServices/ShowTicketService";
 
+const writeFileAsync = promisify(writeFile);
+
 const verifyContact = async (
   msgContact: WbotContact,
   profilePicUrl: string
 ): Promise<Contact> => {
   let contact = await Contact.findOne({
-    where: { number: msgContact.number }
+    where: { number: msgContact.id.user }
   });
 
   if (contact) {
     await contact.update({ profilePicUrl });
   } else {
     contact = await Contact.create({
-      name: msgContact.pushname || msgContact.number.toString(),
-      number: msgContact.number,
+      name: msgContact.name || msgContact.pushname || msgContact.id.user,
+      number: msgContact.id.user,
       profilePicUrl
+    });
+    const io = getIO();
+    io.emit("contact", {
+      action: "create",
+      contact
     });
   }
 
   return contact;
 };
 
+const verifyGroup = async (msgGroupContact: WbotContact) => {
+  const profilePicUrl = await msgGroupContact.getProfilePicUrl();
+
+  let groupContact = await Contact.findOne({
+    where: { number: msgGroupContact.id.user }
+  });
+  if (groupContact) {
+    await groupContact.update({ profilePicUrl });
+  } else {
+    groupContact = await Contact.create({
+      name: msgGroupContact.name,
+      number: msgGroupContact.id.user,
+      isGroup: msgGroupContact.isGroup,
+      profilePicUrl
+    });
+    const io = getIO();
+    io.emit("contact", {
+      action: "create",
+      contact: groupContact
+    });
+  }
+
+  return groupContact;
+};
+
 const verifyTicket = async (
   contact: Contact,
-  whatsappId: number
+  whatsappId: number,
+  groupContact?: Contact
 ): Promise<Ticket> => {
   let ticket = await Ticket.findOne({
     where: {
       status: {
         [Op.or]: ["open", "pending"]
       },
-      contactId: contact.id
+      contactId: groupContact ? groupContact.id : contact.id
     },
     include: ["contact"]
   });
+
+  if (!ticket && groupContact) {
+    ticket = await Ticket.findOne({
+      where: {
+        contactId: groupContact.id
+      },
+      order: [["createdAt", "DESC"]],
+      include: ["contact"]
+    });
+
+    if (ticket) {
+      await ticket.update({ status: "pending", userId: null });
+    }
+  }
 
   if (!ticket) {
     ticket = await Ticket.findOne({
@@ -60,7 +108,7 @@ const verifyTicket = async (
         createdAt: {
           [Op.between]: [+subHours(new Date(), 2), +new Date()]
         },
-        contactId: contact.id
+        contactId: groupContact ? groupContact.id : contact.id
       },
       order: [["createdAt", "DESC"]],
       include: ["contact"]
@@ -73,8 +121,9 @@ const verifyTicket = async (
 
   if (!ticket) {
     const { id } = await Ticket.create({
-      contactId: contact.id,
+      contactId: groupContact ? groupContact.id : contact.id,
       status: "pending",
+      isGroup: !!groupContact,
       whatsappId
     });
 
@@ -86,7 +135,8 @@ const verifyTicket = async (
 
 const handlMedia = async (
   msg: WbotMessage,
-  ticket: Ticket
+  ticket: Ticket,
+  contact: Contact
 ): Promise<Message> => {
   const media = await msg.downloadMedia();
 
@@ -99,18 +149,21 @@ const handlMedia = async (
     media.filename = `${new Date().getTime()}.${ext}`;
   }
 
-  fs.writeFile(
-    path.join(__dirname, "..", "..", "..", "public", media.filename),
-    media.data,
-    "base64",
-    err => {
-      console.log(err);
-    }
-  );
+  try {
+    await writeFileAsync(
+      join(__dirname, "..", "..", "..", "public", media.filename),
+      media.data,
+      "base64"
+    );
+  } catch (err) {
+    console.log(err);
+  }
 
   const newMessage: Message = await ticket.$create("message", {
     id: msg.id.id,
-    body: msg.body || media.filename,
+    body: msg.fromMe
+      ? `${msg.body ? msg.body : media.filename}`
+      : `${contact.name}: ${msg.body ? msg.body : media.filename}`,
     fromMe: msg.fromMe,
     mediaUrl: media.filename,
     mediaType: media.mimetype.split("/")[0]
@@ -127,12 +180,14 @@ const handleMessage = async (
   let newMessage: Message;
 
   if (msg.hasMedia) {
-    newMessage = await handlMedia(msg, ticket);
+    newMessage = await handlMedia(msg, ticket, contact);
   } else {
     newMessage = await ticket.$create("message", {
       id: msg.id.id,
-      body: msg.body,
-      fromMe: msg.fromMe
+      body: msg.fromMe ? msg.body : `${contact.name}: ${msg.body}`,
+      fromMe: msg.fromMe,
+      mediaType: msg.type,
+      read: msg.fromMe
     });
     await ticket.update({ lastMessage: msg.body });
   }
@@ -150,7 +205,7 @@ const handleMessage = async (
 };
 
 const isValidMsg = (msg: WbotMessage): boolean => {
-  if (msg.author) return false;
+  if (msg.from === "status@broadcast") return false;
   if (
     msg.type === "chat" ||
     msg.type === "audio" ||
@@ -158,7 +213,8 @@ const isValidMsg = (msg: WbotMessage): boolean => {
     msg.type === "video" ||
     msg.type === "image" ||
     msg.type === "document" ||
-    msg.type === "vcard"
+    msg.type === "vcard" ||
+    msg.type === "sticker"
   )
     return true;
   return false;
@@ -170,34 +226,55 @@ const wbotMessageListener = (whatsapp: Whatsapp): void => {
   const io = getIO();
 
   wbot.on("message_create", async msg => {
+    // console.log(msg);
     if (!isValidMsg(msg)) {
       return;
     }
 
     try {
       let msgContact: WbotContact;
+      let groupContact: Contact | undefined;
 
       if (msg.fromMe) {
         msgContact = await wbot.getContactById(msg.to);
+
+        // return if it's a media message, it will be handled by media_uploaded event
+
+        if (msg.hasMedia || msg.type !== "chat") return;
       } else {
         msgContact = await msg.getContact();
       }
 
+      // if message has an author, its a gruop message.
+
+      if (msg.author) {
+        const msgGroupContact = await wbot.getContactById(msg.from);
+        groupContact = await verifyGroup(msgGroupContact);
+      }
+
       const profilePicUrl = await msgContact.getProfilePicUrl();
       const contact = await verifyContact(msgContact, profilePicUrl);
-      const ticket = await verifyTicket(contact, whatsappId);
+      const ticket = await verifyTicket(contact, whatsappId, groupContact);
 
-      // return if message was already created by messageController
+      await handleMessage(msg, ticket, contact);
+    } catch (err) {
+      Sentry.captureException(err);
+      console.log(err);
+    }
+  });
 
-      if (msg.fromMe) {
-        const alreadyExists = await Message.findOne({
-          where: { id: msg.id.id }
-        });
-
-        if (alreadyExists) {
-          return;
-        }
+  wbot.on("media_uploaded", async msg => {
+    try {
+      let groupContact: Contact | undefined;
+      const msgContact = await wbot.getContactById(msg.to);
+      if (msg.author) {
+        const msgGroupContact = await wbot.getContactById(msg.from);
+        groupContact = await verifyGroup(msgGroupContact);
       }
+
+      const profilePicUrl = await msgContact.getProfilePicUrl();
+      const contact = await verifyContact(msgContact, profilePicUrl);
+      const ticket = await verifyTicket(contact, whatsappId, groupContact);
 
       await handleMessage(msg, ticket, contact);
     } catch (err) {
@@ -207,6 +284,8 @@ const wbotMessageListener = (whatsapp: Whatsapp): void => {
   });
 
   wbot.on("message_ack", async (msg, ack) => {
+    await new Promise(r => setTimeout(r, 500));
+
     try {
       const messageToUpdate = await Message.findOne({
         where: { id: msg.id.id }
